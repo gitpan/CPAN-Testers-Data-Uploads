@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use vars qw($VERSION);
-$VERSION = '0.11';
+$VERSION = '0.12';
 $|++;
 
 #----------------------------------------------------------------------------
@@ -31,7 +31,7 @@ my (%backups);
 use constant    LASTMAIL    => '_lastmail';
 
 my %phrasebook = (
-    'FindDistVersion'   => 'SELECT * FROM uploads WHERE author=? AND dist=? AND version=?',
+    'FindDistVersion'   => 'SELECT type FROM uploads WHERE author=? AND dist=? AND version=?',
     'InsertDistVersion' => 'INSERT INTO uploads (type,author,dist,version,filename,released) VALUES (?,?,?,?,?,?)',
     'UpdateDistVersion' => 'UPDATE uploads SET type=? WHERE author=? AND dist=? AND version=?',
     'FindDistTypes'     => 'SELECT * FROM uploads WHERE type=?',
@@ -48,6 +48,8 @@ my %phrasebook = (
     'GetAllAuthors'     => 'SELECT distinct(author) FROM uploads',
 
     'InsertRequest'     => 'INSERT INTO page_requests (type,name,weight) VALUES (?,?,5)',
+
+    'FastReIndex'       => 'SELECT u.* FROM ixlatest AS x INNER JOIN uploads AS u ON u.dist=x.dist WHERE x.released < u.released ORDER BY u.released',
 
     # SQLite backup
     'CreateTable'       => 'CREATE TABLE uploads  (type text, author text, dist text, version text, filename text, released int)',
@@ -80,14 +82,15 @@ sub DESTROY {
 
 __PACKAGE__->mk_accessors(
     qw( uploads backpan cpan logfile logclean lastfile
-        mgenerate mupdate mbackup mreindex ));
+        mgenerate mupdate mbackup mreindex mfast ));
 
 sub process {
     my $self = shift;
-    $self->generate()  if($self->mgenerate);
-    $self->reindex()   if($self->mreindex);
-    $self->update()    if($self->mupdate);
-    $self->backup()    if($self->mbackup);
+    $self->generate()       if($self->mgenerate);
+    $self->reindex()        if($self->mreindex);
+    $self->reindex_fast()   if($self->mfast);
+    $self->update()         if($self->mupdate);
+    $self->backup()         if($self->mbackup);
 }
 
 sub generate {
@@ -125,6 +128,22 @@ sub reindex {
     $self->_log("Reindexing distros done");
 }
 
+sub reindex_fast {
+    my $self = shift;
+    my $db = $self->uploads;
+
+    $self->_log("Reindexing distros FAST");
+
+    my @rows = $db->get_query('hash',$phrasebook{'FastReIndex'});
+    for my $row (@rows) {
+        $self->_log(".. dist = $row->{dist}");
+        $db->do_query($phrasebook{'DeleteIndex'},$row->{dist});
+        $db->do_query($phrasebook{'InsertIndex'},$row->{author},$row->{version},$row->{released},$row->{dist},$oncpan{$row->{type}});
+    }
+
+    $self->_log("Reindexing distros FAST done");
+}
+
 sub update {
     my $self = shift;
     my $db = $self->uploads;
@@ -157,7 +176,7 @@ sub update {
     $self->_log("Updating NNTP entries");
     my ($nntp,$num,$first,$last) = $self->_nntp_connect();
     my $lastid = $self->_lastid();
-    next    if($last <= $lastid);
+    return    if($last <= $lastid);
 
     $self->_log(".. from $lastid to $last");
     for(my $id = $lastid+1; $id <= $last; $id++) {
@@ -236,11 +255,12 @@ sub help {
         print <<HERE;
 
 Usage: $0 \\
-         -config=<file> [-g] [-u] [-b] [-h] [-v]
+         -config=<file> [-g] [-u] [-f] [-b] [-h] [-v]
 
   --config=<file>   database configuration file
   -g                generate new database
   -r                reindex database (*)
+  -f                fast reindex database
   -u                update existing database
   -b                backup database to portable files
   -h                this help screen
@@ -276,9 +296,11 @@ sub _parse_archive {
 
     my @rows = $db->get_query('array',$phrasebook{'FindDistVersion'},$cpanid,$name,$version);
     if(@rows) {
-        $db->do_query($phrasebook{'UpdateDistVersion'},$type,$cpanid,$name,$version)
-            unless($type eq $rows[0]->{type});
-        $self->_update_index($cpanid,$version,$date,$name,$oncpan{$type})   if($update && $type ne 'backpan');
+        if($type ne $rows[0]->[0]) {
+            $db->do_query($phrasebook{'UpdateDistVersion'},$type,$cpanid,$name,$version);
+            $self->_update_index($cpanid,$version,$date,$name,$oncpan{$type})   
+            if($update && $type ne 'backpan');
+    }
     } else {
         $db->do_query($phrasebook{'InsertDistVersion'},$type,$cpanid,$name,$version,$filename,$date);
         $self->_update_index($cpanid,$version,$date,$name,$oncpan{$type})   if($update);
@@ -343,21 +365,22 @@ sub _init_options {
         'generate|g',
         'update|u',
         'reindex|r',
+        'fast|f',
         'backup|b',
         'help|h',
         'version|v'
     );
 
     # default to API settings if no command line option
-    for(qw(config generate update reindex backup help version)) {
+    for(qw(config generate update reindex fast backup help version)) {
         $options{$_} ||= $hash{$_}  if(defined $hash{$_});
     }
 
     $self->help(1)  if($options{help});
     $self->help(0)  if($options{version});
 
-    $self->help(1,"Must specify at least one option from 'generate' (-g), 'reindex' (-r),\n'update' (-u)  and/or 'backup' (-b)")
-                                                                        unless($options{generate} || $options{update} || $options{backup} || $options{reindex});
+    $self->help(1,"Must specify at least one option from 'generate' (-g), 'reindex' (-r),\n'fast' (-f), 'update' (-u)  and/or 'backup' (-b)")
+                                                                        unless($options{generate} || $options{update} || $options{backup} || $options{reindex} || $options{fast});
     $self->help(1,"Must specific the configuration file")               unless($options{config});
     $self->help(1,"Configuration file [$options{config}] not found")    unless(-f $options{config});
 
@@ -383,6 +406,7 @@ sub _init_options {
         $self->mreindex(1);
     }
 
+    $self->mfast(1)     if($options{fast});
     $self->mupdate(1)   if($options{update});
     $self->logfile(  $cfg->val('MASTER','logfile'  ) );
     $self->logclean( $cfg->val('MASTER','logclean' ) || 0 );
@@ -511,15 +535,83 @@ Instatiates the object CPAN::Testers::Data::Uploads:
 
 =item * process
 
+Based on accessor settings will run the appropriate methods for the current
+execution.
+
 =item * generate
+
+Generates a new uploads and ixlatest database.
 
 =item * reindex
 
+Rebuilds the ixlatest table for all entries.
+
+=item * reindex_fast
+
+Updates the ixlatest tables for any entries that have had a more recent upload.
+
 =item * update
+
+Updates the uploads and ixlatest databases.
 
 =item * backup
 
+Provides backup files of the uploads database.
+
 =item * help
+
+Provides a help screen.
+
+=back
+
+=head2 Accessor Methods
+
+=over
+
+=item * uploads
+
+Database handle to the uploads database.
+
+=item * backpan
+
+Path to the BACKPAN archive directory.
+
+=item * cpan
+
+Path to the CPAN archive directory.
+
+=item * logfile
+
+Path to output log file for progress and debugging messages.
+
+=item * logclean
+
+If set to a true value will create/overwrite the logfile, otherwise will
+append any messages.
+
+=item * lastfile
+
+Path to the file containing the last NNTPID processed.
+
+=item * mgenerate
+
+If set to a true value runs in generate mode for the process method().
+
+=item * mupdate
+
+If set to a true value runs in update mode for the process method().
+
+=item * mbackup
+
+If set to a true value runs in backup mode for the process method().
+
+=item * mreindex
+
+If set to a true value runs in reindex mode for the process method().
+
+=item * mfast
+
+If set to a true value runs in fast reindex mode for the process method().
 
 =back
 
@@ -529,7 +621,11 @@ Instatiates the object CPAN::Testers::Data::Uploads:
 
 =item * _parse_archive
 
+Parses the given article from the NNTP feed.
+
 =item * _update_index
+
+Updates the ixlatest table and pushes requests to the page_request table.
 
 =item * _nntp_connect
 
@@ -537,7 +633,12 @@ Sets up the connection to the NNTP server.
 
 =item * _lastid
 
+Sets or returns the last NNTPID processed.
+
 =item * _init_options
+
+Initialises internal configuration settings based on command line options, API
+options and configuration file settings.
 
 =back
 
