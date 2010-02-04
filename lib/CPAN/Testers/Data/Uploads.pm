@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use vars qw($VERSION);
-$VERSION = '0.13';
+$VERSION = '0.14';
 $|++;
 
 #----------------------------------------------------------------------------
@@ -29,6 +29,7 @@ use Net::NNTP;
 
 my (%backups);
 use constant    LASTMAIL    => '_lastmail';
+use constant    LOGFILE     => '_uploads.log';
 
 my %phrasebook = (
     'FindDistVersion'   => 'SELECT type FROM uploads WHERE author=? AND dist=? AND version=?',
@@ -381,7 +382,7 @@ sub _init_options {
 
     $self->help(1,"Must specify at least one option from 'generate' (-g), 'reindex' (-r),\n'fast' (-f), 'update' (-u)  and/or 'backup' (-b)")
                                                                         unless($options{generate} || $options{update} || $options{backup} || $options{reindex} || $options{fast});
-    $self->help(1,"Must specific the configuration file")               unless($options{config});
+    $self->help(1,"Must specific the configuration file")               unless(   $options{config});
     $self->help(1,"Configuration file [$options{config}] not found")    unless(-f $options{config});
 
     # load configuration
@@ -408,8 +409,8 @@ sub _init_options {
 
     $self->mfast(1)     if($options{fast});
     $self->mupdate(1)   if($options{update});
-    $self->logfile(  $cfg->val('MASTER','logfile'  ) );
-    $self->logclean( $cfg->val('MASTER','logclean' ) || 0 );
+    $self->logfile(  $cfg->val('MASTER','logfile'  ) || LOGFILE  );
+    $self->logclean( $cfg->val('MASTER','logclean' ) || 0        );
     $self->lastfile( $cfg->val('MASTER','lastfile' ) || LASTMAIL );
 
     # configure upload DB
@@ -693,7 +694,7 @@ F<http://wiki.cpantesters.org/>
 
 =head1 COPYRIGHT AND LICENSE
 
-  Copyright (C) 2008-2009 Barbie for Miss Barbell Productions.
+  Copyright (C) 2008-2010 Barbie for Miss Barbell Productions.
 
   This module is free software; you can redistribute it and/or
   modify it under the same terms as Perl itself.
