@@ -12,6 +12,7 @@ The distribution requires the following modules:
   CPAN::Testers::Common::Article
   CPAN::Testers::Common::DBUtils
   Config::IniFiles
+  DBI
   DBD::mysql
   DBD::SQLite
   File::Basename
@@ -19,6 +20,7 @@ The distribution requires the following modules:
   File::Path
   File::Slurp
   Getopt::Long
+  IO::AtomicFile
   IO::File
   Net::NNTP
 
@@ -45,7 +47,7 @@ documentation, please submit a bug to the RT system (see link below). However,
 it would help greatly if you are able to pinpoint problems or even supply a 
 patch. 
 
-Fixes are dependant upon their severity and my availablity. Should a fix not
+Fixes are dependent upon their severity and my availability. Should a fix not
 be forthcoming, please feel free to (politely) remind me by sending an email
 to barbie@cpan.org .
 
@@ -58,7 +60,7 @@ for Miss Barbell Productions http://www.missbarbell.co.uk.
 
 COPYRIGHT AND LICENSE
 
-  Copyright (C) 2008-2011 Barbie for Miss Barbell Productions
+  Copyright (C) 2008-2012 Barbie for Miss Barbell Productions
 
   This module is free software; you can redistribute it and/or
   modify it under the Artistic Licence v2.

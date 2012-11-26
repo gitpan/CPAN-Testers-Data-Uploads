@@ -1,7 +1,5 @@
-#!perl
-
+#!/usr/bin/perl -w
 use strict;
-use warnings;
 
 use Test::More tests => 8;
 
@@ -21,5 +19,3 @@ is( $obj->_lastid(3), 3, "set 3" );
 is( $obj->_lastid, 3, "retreive 3" );
 
 ok( unlink($f), 'removed last_id.txt' );
-
-

@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use vars qw($VERSION);
-$VERSION = '0.17';
+$VERSION = '0.18';
 $|++;
 
 #----------------------------------------------------------------------------
@@ -16,6 +16,7 @@ use CPAN::DistnameInfo;
 use CPAN::Testers::Common::DBUtils;
 use CPAN::Testers::Common::Article;
 use Config::IniFiles;
+use DBI;
 use File::Basename;
 use File::Find::Rule;
 use File::Path;
@@ -49,7 +50,7 @@ my %phrasebook = (
     'InsertIndex'       => 'INSERT INTO ixlatest (oncpan,author,version,released,dist) VALUES (?,?,?,?,?)',
     'AmendIndex'        => 'UPDATE ixlatest SET oncpan=? WHERE author=? AND version=? AND dist=?',
     'UpdateIndex'       => 'UPDATE ixlatest SET oncpan=?,version=?,released=? WHERE dist=? AND author=?',
-    'BuildAuthorIndex'  => 'SELECT x.author,x.version,x.released,x.dist,x.type FROM (SELECT dist, MAX(released) AS maxvalue FROM uploads WHERE author=? GROUP BY dist) AS y INNER JOIN uploads AS x ON x.dist=y.dist AND x.released=y.maxvalue ORDER BY released',
+    'BuildAuthorIndex'  => 'SELECT x.author,x.version,x.released,x.dist,x.type FROM (SELECT dist, MAX(released) AS mv FROM uploads WHERE author=? GROUP BY dist) AS y INNER JOIN uploads AS x ON x.dist=y.dist AND x.released=y.mv ORDER BY released',
     'GetAllAuthors'     => 'SELECT distinct(author) FROM uploads',
 
     'InsertRequest'     => 'INSERT INTO page_requests (type,name,weight) VALUES (?,?,5)',
@@ -86,7 +87,7 @@ sub DESTROY {
 }
 
 __PACKAGE__->mk_accessors(
-    qw( uploads backpan cpan logfile logclean lastfile
+    qw( uploads backpan cpan logfile logclean lastfile journal
         mgenerate mupdate mbackup mreindex ));
 
 sub process {
@@ -124,7 +125,7 @@ sub reindex {
         $self->_log(".. author = $author->{author}");
         my @rows = $db->get_query('hash',$phrasebook{'BuildAuthorIndex'},$author->{author});
         for my $row (@rows) {
-        $self->_log(".... dist = $row->{dist}");
+        $self->_log(".... dist = $row->{dist}, latest = $row->{version}");
             $db->do_query($phrasebook{'DeleteIndex'},$row->{dist},$row->{author});
             $db->do_query($phrasebook{'InsertIndex'},$oncpan{$row->{type}},$row->{author},$row->{version},$row->{released},$row->{dist});
         }
@@ -172,6 +173,7 @@ sub update {
     for(my $id = $lastid+1; $id <= $last; $id++) {
         #$self->_log("NNTP ID = $id");
         my $article = join "", @{$nntp->article($id) || []};
+        next    unless($article);
         my $object = CPAN::Testers::Common::Article->new($article);
         next    unless($object);
         $self->_log("... [$id] subject=".($object->subject()));
@@ -208,6 +210,13 @@ sub backup {
     my $db = $self->uploads;
 
     if(my @journals = $self->_find_journals()) {
+        for my $driver (keys %backups) {
+            if($driver =~ /(CSV|SQLite)/i && !$backups{$driver}{'exists'}) {
+                $backups{$driver}{db}->do_query($phrasebook{'CreateTable'});
+                $backups{$driver}{'exists'} = 1;
+            }
+        }
+        
         for my $journal (@journals) {
             next    if($journal =~ /TMP$/); # don't process active journals
             $self->_log("Processing journal $journal");
@@ -228,6 +237,7 @@ sub backup {
                 $backups{$driver}{db}->do_query($phrasebook{'DeleteAll'});
             } elsif($driver =~ /(CSV|SQLite)/i) {
                 $backups{$driver}{db}->do_query($phrasebook{'CreateTable'});
+                $backups{$driver}{'exists'} = 1;
             }
         }
 
@@ -262,8 +272,9 @@ sub help {
     if($full) {
         print <<HERE;
 
-Usage: $0 \\
-         -config=<file> [-g] [-r] [-u] [-b] [-h] [-v]
+Usage: $0 --config=<file> [-g] [-r] [-u] [-b] [-h] [-v]
+        [--logfile=<file>] [--logclean] 
+        [--lastmail=<file>] [--journal=<file>]
 
   --config=<file>   database configuration file
   -g                generate new database
@@ -272,6 +283,10 @@ Usage: $0 \\
   -b                backup database to portable files
   -h                this help screen
   -v                program version
+  --logfile=<file>  trace log file
+  --logclean        overwrite exisiting log file
+  --lastmail=<file> last id file
+  --journal=<file>  SQL journal file path
 
 Notes:
   * A generate request automatically includes a reindex.
@@ -371,13 +386,13 @@ sub _lastid {
 sub _open_journal {
     my $self = shift;
     my @now  = localtime(time);
-    my $file = sprintf "%s.%04d%02d%02d%02d%02d%02d", JOURNAL, $now[5]+1900,$now[4]+1,$now[3],$now[2],$now[1],$now[0];
-    $self->{journal} = IO::AtomicFile->new($file,'w+') or die "Cannot write to journal file [$file]: $!\n";
+    my $file = sprintf "%s.%04d%02d%02d%02d%02d%02d", $self->journal, $now[5]+1900,$now[4]+1,$now[3],$now[2],$now[1],$now[0];
+    $self->{current} = IO::AtomicFile->new($file,'w+') or die "Cannot write to journal file [$file]: $!\n";
 }
 
 sub _write_journal {
     my ($self,$phrase,@args) = @_;
-    my $fh = $self->{journal};
+    my $fh = $self->{current};
 
     print $fh "$phrase," . join(',',@args) . "\n";
 
@@ -387,11 +402,12 @@ sub _write_journal {
 
 sub _close_journal {
     my $self = shift;
-    $self->{journal}->close;
+    $self->{current}->close;
 }
 
 sub _find_journals {
-    my @files = glob(JOURNAL . '.*');
+    my $self = shift;
+    my @files = glob($self->journal . '.*');
     return @files;
 }
 
@@ -425,6 +441,7 @@ sub _init_options {
         'update|u',
         'reindex|r',
         'backup|b',
+        'journal|j=s',
         'logfile|l=s',
         'logclean=s',
         'lastfile=s',
@@ -471,10 +488,11 @@ sub _init_options {
     $self->logfile(  $hash{logfile}  || $options{logfile}  || $cfg->val('MASTER','logfile'  ) || LOGFILE  );
     $self->logclean( $hash{logclean} || $options{logclean} || $cfg->val('MASTER','logclean' ) || 0        );
     $self->lastfile( $hash{lastfile} || $options{lastfile} || $cfg->val('MASTER','lastfile' ) || LASTMAIL );
+    $self->journal(  $hash{journal}  || $options{journal}  || $cfg->val('MASTER','journal'  ) || JOURNAL  );
 
     # configure upload DB
     $self->help(1,"No configuration for UPLOADS database") unless($cfg->SectionExists('UPLOADS'));
-    my %opts = map {$_ => ($cfg->val('UPLOADS',$_) || undef);} qw(driver database dbfile dbhost dbport dbuser dbpass);
+    my %opts = map {$_ => ($cfg->val('UPLOADS',$_) || undef)} qw(driver database dbfile dbhost dbport dbuser dbpass);
     my $db = CPAN::Testers::Common::DBUtils->new(%opts);
     $self->help(1,"Cannot configure UPLOADS database") unless($db);
     $self->uploads($db);
@@ -483,12 +501,17 @@ sub _init_options {
     if($options{backup}) {
         $self->help(1,"No configuration for BACKUPS with backup option")    unless($cfg->SectionExists('BACKUPS'));
 
-        $self->mbackup(1);
+        my %available_drivers = map { $_ => 1 } DBI->available_drivers;
         my @drivers = $cfg->val('BACKUPS','drivers');
         for my $driver (@drivers) {
+            unless($available_drivers{$driver}) {
+                warn "No DBI support for '$driver', ignoring\n";
+                next;
+            }
+
             $self->help(1,"No configuration for backup option '$driver'")   unless($cfg->SectionExists($driver));
 
-            my %opt = map {$_ => $cfg->val($driver,$_);} qw(driver database dbfile dbhost dbport dbuser dbpass);
+            my %opt = map {$_ => ($cfg->val($driver,$_) || undef)} qw(driver database dbfile dbhost dbport dbuser dbpass);
             $backups{$driver}{'exists'} = $driver =~ /SQLite/i ? -f $opt{database} : 1;
 
             # CSV is a bit of an oddity!
@@ -502,6 +525,8 @@ sub _init_options {
             $backups{$driver}{db} = CPAN::Testers::Common::DBUtils->new(%opt);
             $self->help(1,"Cannot configure BACKUPS database for '$driver'")   unless($backups{$driver}{db});
         }
+
+        $self->mbackup(1)   if(keys %backups);
     }
 }
 
@@ -639,6 +664,7 @@ Path to the CPAN archive directory.
 =item * logfile
 
 Path to output log file for progress and debugging messages.
+Default file: '_uploads.log'.
 
 =item * logclean
 
@@ -647,7 +673,13 @@ append any messages.
 
 =item * lastfile
 
-Path to the file containing the last NNTPID processed.
+Path to the file containing the last NNTPID processed. 
+Default file: '_lastmail'.
+
+=item * journal
+
+Path to the journal file. 
+Default file: '_journal.sql'.
 
 =item * mgenerate
 
@@ -720,7 +752,7 @@ bug or are experiencing difficulties, that is not explained within the POD
 documentation, please send an email to barbie@cpan.org. However, it would help
 greatly if you are able to pinpoint problems or even supply a patch.
 
-Fixes are dependant upon their severity and my availablity. Should a fix not
+Fixes are dependent upon their severity and my availability. Should a fix not
 be forthcoming, please feel free to (politely) remind me.
 
 RT Queue -
@@ -742,9 +774,9 @@ F<http://wiki.cpantesters.org/>
 
 =head1 COPYRIGHT AND LICENSE
 
-  Copyright (C) 2008-2011 Barbie for Miss Barbell Productions.
+  Copyright (C) 2008-2012 Barbie for Miss Barbell Productions.
 
   This module is free software; you can redistribute it and/or
-  modify it under the same terms as Perl itself.
+  modify it under the Artistic Licence v2.
 
 =cut
