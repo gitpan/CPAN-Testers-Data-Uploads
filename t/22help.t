@@ -7,7 +7,7 @@ use Test::Trap;
 {
     use CPAN::Testers::Data::Uploads;
 
-    my $VERSION = '0.18';
+    my $VERSION = '0.19';
 
     my $obj;
     my $stdout;
